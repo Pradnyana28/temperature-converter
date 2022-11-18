@@ -1,0 +1,124 @@
+service: peatix
+
+custom:
+  defaultStage: dev
+  defaultRegion: ap-southeast-1
+
+provider:
+  name: aws
+  runtime: nodejs16.x
+  lambdaHashingVersion: 20201221
+  memorySize: 512
+  logRetentionInDays: 14
+  timeout: 14
+  stackName: ${self:service}-${opt:stage}
+  stage: ${env:ENVIRONMENT, 'dev'}-${opt:stage, self:custom.defaultStage}
+  region: ${opt:region, self:custom.defaultRegion}
+  deploymentPrefix: peatix
+  endpointType: regional
+  environment:
+    LOG_LEVEL: debug
+    REGION: ${opt:region}
+    STAGE: ${opt:stage, self:custom.defaultStage}
+
+# Occasionally, the error "EMFILE: too many open files" happen in Windows.
+# To resolve this, can use plugins
+# See: https://github.com/serverless/serverless/issues/10944#issuecomment-1091936902
+plugins:
+  - serverless-plugin-common-excludes
+  - serverless-plugin-include-dependencies
+
+package:
+  exclude:
+    - ./*.html
+    - ./*.txt
+    - ./custom.js
+    - ./**/*.map
+  excludeDevDependencies: true
+  individually: true
+      
+functions:
+  customAuthorizer:
+    handler: lambda/custom-authorizer/index.handler
+    role: IAMRoleForLambdaFunction
+    layers:
+      - Ref: PackageLayerLambdaLayer
+  temperatureConverter:
+    handler: lambda/temperature-converter/index.handler
+    role: IAMRoleForLambdaFunction
+    layers:
+      - Ref: PackageLayerLambdaLayer
+    events:
+      - http:
+          path: /temperature/convert/{from}
+          method: post
+          cors: true
+          authorizer:
+            type: CUSTOM
+            authorizerId:
+              Ref: ApiGatewayAuthorizer
+
+layers:
+  PackageLayer:
+    path: layer
+    name: ${self:service}-package-layer
+    compatibleRuntimes:
+      - nodejs16.x
+
+resources:
+  Resources:
+    IAMRoleForLambdaFunction:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - Ref: IAMManagedPolicyForCloudWatchPolicy
+
+    IAMManagedPolicyForCloudWatchPolicy:
+      Type: AWS::IAM::ManagedPolicy
+      Properties:
+        Description: CloudWatch Logs Policy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:DescribeLogGroups
+                - logs:DescribeLogStreams
+                - logs:PutLogEvents
+                - logs:GetLogEvents
+                - logs:FilterLogEvents
+              Resource:
+                - "*"
+            - Effect: Allow
+              Action:
+                - cloudwatch:*
+              Resource: "*"
+
+    ApiGatewayAuthorizer:
+      Type: AWS::ApiGateway::Authorizer
+      Properties:
+        Name: Authorizer
+        Type: REQUEST
+        AuthorizerResultTtlInSeconds: 300
+        IdentitySource: method.request.header.Authorization
+        AuthorizerUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CustomAuthorizerLambdaFunction.Arn}/invocations
+        RestApiId: !Ref ApiGatewayRestApi
+  
+    ApiGatewayPermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        Action: lambda:InvokeFunction
+        FunctionName: !GetAtt CustomAuthorizerLambdaFunction.Arn
+        Principal: apigateway.amazonaws.com
+        SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/authorizers/${ApiGatewayAuthorizer}
